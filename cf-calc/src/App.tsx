@@ -25,16 +25,6 @@ const gcdBI = (a: bigint, b: bigint): bigint => {
   return a;
 };
 
-// Integer square root (floor)
-const isqrt = (n: bigint) => {
-  if (n < 0n) throw new Error("sqrt of negative");
-  if (n < 2n) return n;
-  // Newton's method
-  let x0 = n;
-  let x1 = (n >> 1n) + 1n;
-  while (x1 < x0) { x0 = x1; x1 = (x1 + n / x1) >> 1n; }
-  return x0;
-};
 
 // Matrix [[a,b],[c,d]] × [[e,f],[g,h]]
 const matMul = (M: bigint[][], N: bigint[][]): bigint[][] => {
