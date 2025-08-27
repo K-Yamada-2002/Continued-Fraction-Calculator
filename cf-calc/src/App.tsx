@@ -454,7 +454,6 @@ const NumberField: React.FC<{ label: string; value: number; setValue: (n: number
    const toks: Tok[] = [];
    let i = 0;
    const peek = () => s[i];
-   const next = () => s[i++];
    while (i < s.length) {
      const c = peek();
      if (c <= ' ') { i++; continue; }
