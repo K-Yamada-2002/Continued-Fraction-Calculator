@@ -25,6 +25,16 @@ const gcdBI = (a: bigint, b: bigint): bigint => {
   return a;
 };
 
+// Integer square root (floor)
+const isqrt = (n: bigint) => {
+  if (n < 0n) throw new Error("sqrt of negative");
+  if (n < 2n) return n;
+  // Newton's method
+  let x0 = n;
+  let x1 = (n >> 1n) + 1n;
+  while (x1 < x0) { x0 = x1; x1 = (x1 + n / x1) >> 1n; }
+  return x0;
+};
 
 // Matrix [[a,b],[c,d]] × [[e,f],[g,h]]
 const matMul = (M: bigint[][], N: bigint[][]): bigint[][] => {
@@ -326,6 +336,223 @@ const NumberField: React.FC<{ label: string; value: number; setValue: (n: number
   );
 };
 
+// ---------- Expression parsing & arithmetic (rational / quadratic surd) ----------
+
+// Value types
+ type Rat = { kind: 'rat'; p: bigint; q: bigint };
+ type ValSurd = { kind: 'surd'; P: bigint; Q: bigint; R: bigint; Delta: bigint };
+ type Approx = { kind: 'approx'; x: number };
+ type Val = Rat | ValSurd | Approx;
+
+ const rat = (p: bigint, q: bigint = 1n): Rat => normRat({ kind: 'rat', p, q });
+ const normRat = (r: Rat): Rat => {
+   let { p, q } = r;
+   if (q === 0n) throw new Error('division by zero');
+   const g = gcdBI(absBI(p), absBI(q));
+   p /= g; q /= g; if (q < 0n) { p = -p; q = -q; }
+   return { kind: 'rat', p, q };
+ };
+ const toApprox = (v: Val): number => v.kind === 'rat' ? Number(v.p) / Number(v.q)
+   : v.kind === 'surd' ? (Number(v.P) + Number(v.Q) * Math.sqrt(Number(v.Delta))) / Number(v.R)
+   : v.x;
+
+ const normSurd = (s: ValSurd): ValSurd => {
+   // reduce gcd and normalize sign (do not factor Delta here; display will do)
+   let { P, Q, R, Delta } = s;
+   let g = gcdBI(gcdBI(absBI(P), absBI(Q)), absBI(R));
+   if (g !== 0n) { P /= g; Q /= g; R /= g; }
+   if (R < 0n) { P = -P; Q = -Q; R = -R; }
+   if (Q === 0n) { // becomes rational
+     return { kind: 'surd', P, Q, R, Delta };
+   }
+   return { kind: 'surd', P, Q, R, Delta };
+ };
+
+ // Convert CF (finite/periodic) to Val
+ const cfToVal = (cf: ParsedCF): Val => {
+   if (!cf.isPeriodic) {
+     const { p, q } = evalFiniteExact(cf.a0, cf.prefix);
+     return rat(p, q);
+   }
+   const s = surdFromPeriodic([cf.a0, ...cf.prefix], cf.period);
+   return { kind: 'surd', P: s.P, Q: s.Q, R: s.R, Delta: s.Delta };
+ };
+
+ // Arithmetic in Q(√Δ)
+ const sameDelta = (a: ValSurd, b: ValSurd) => a.Delta === b.Delta;
+ const addVal = (a: Val, b: Val): Val => {
+   if (a.kind === 'approx' || b.kind === 'approx') return { kind: 'approx', x: toApprox(a) + toApprox(b) };
+   if (a.kind === 'rat' && b.kind === 'rat') return rat(a.p * b.q + b.p * a.q, a.q * b.q);
+   if (a.kind === 'surd' && b.kind === 'rat') {
+     const P = a.P * b.q + b.p * a.R; const Q = a.Q * b.q; const R = a.R * b.q;
+     return normSurd({ kind:'surd', P, Q, R, Delta: a.Delta });
+   }
+   if (a.kind === 'rat' && b.kind === 'surd') return addVal(b, a);
+   // surd + surd
+   if (a.kind === 'surd' && b.kind === 'surd') {
+     if (!sameDelta(a,b)) return { kind: 'approx', x: toApprox(a) + toApprox(b) };
+     const P = a.P * b.R + b.P * a.R;
+     const Q = a.Q * b.R + b.Q * a.R;
+     const R = a.R * b.R;
+     return normSurd({ kind:'surd', P, Q, R, Delta: a.Delta });
+   }
+   return { kind: 'approx', x: toApprox(a) + toApprox(b) };
+ };
+ const subVal = (a: Val, b: Val): Val => addVal(a, mulVal(rat(-1n), b));
+ const mulVal = (a: Val, b: Val): Val => {
+   if (a.kind === 'approx' || b.kind === 'approx') return { kind: 'approx', x: toApprox(a) * toApprox(b) };
+   if (a.kind === 'rat' && b.kind === 'rat') return rat(a.p * b.p, a.q * b.q);
+   if (a.kind === 'surd' && b.kind === 'rat') {
+     const P = a.P * b.p; const Q = a.Q * b.p; const R = a.R * b.q; return normSurd({ kind:'surd', P, Q, R, Delta: a.Delta });
+   }
+   if (a.kind === 'rat' && b.kind === 'surd') return mulVal(b, a);
+   // surd * surd
+   if (a.kind === 'surd' && b.kind === 'surd') {
+     if (!sameDelta(a,b)) return { kind: 'approx', x: toApprox(a) * toApprox(b) };
+     const P = a.P * b.P + a.Q * b.Q * a.Delta;
+     const Q = a.P * b.Q + b.P * a.Q;
+     const R = a.R * b.R;
+     return normSurd({ kind:'surd', P, Q, R, Delta: a.Delta });
+   }
+   return { kind: 'approx', x: toApprox(a) * toApprox(b) };
+ };
+ const divVal = (a: Val, b: Val): Val => {
+   if (a.kind === 'approx' || b.kind === 'approx') return { kind: 'approx', x: toApprox(a) / toApprox(b) };
+   if (b.kind === 'rat' && b.p === 0n) throw new Error('division by zero');
+   if (a.kind === 'rat' && b.kind === 'rat') return rat(a.p * b.q, a.q * b.p);
+   if (a.kind === 'surd' && b.kind === 'rat') {
+     if (b.p === 0n) throw new Error('division by zero');
+     const P = a.P * b.q; const Q = a.Q * b.q; const R = a.R * b.p; return normSurd({ kind:'surd', P, Q, R, Delta: a.Delta });
+   }
+   if (a.kind === 'rat' && b.kind === 'surd') {
+     // a / b = a * (conj(b)) / (b * conj(b))
+     const conj = { P: b.P, Q: -b.Q };
+     const numP = a.p * (conj.P); // multiplied later by b.R in norm
+     const numQ = a.p * (conj.Q);
+     const den = a.q * (b.P*b.P - b.Q*b.Q*b.Delta);
+     const P = numP * b.R; const Q = numQ * b.R; const R = den; return normSurd({ kind:'surd', P, Q, R, Delta: b.Delta });
+   }
+   if (a.kind === 'surd' && b.kind === 'surd') {
+     if (!sameDelta(a,b)) return { kind: 'approx', x: toApprox(a) / toApprox(b) };
+     const denom = b.P*b.P - b.Q*b.Q*b.Delta;
+     if (denom === 0n) throw new Error('division by zero');
+     const P = (a.P*b.P - a.Q*b.Q*b.Delta) * b.R;
+     const Q = (b.P*a.Q - a.P*b.Q) * b.R;
+     const R = a.R * denom;
+     return normSurd({ kind:'surd', P, Q, R, Delta: a.Delta });
+   }
+   return { kind: 'approx', x: toApprox(a) / toApprox(b) };
+ };
+
+ // Minimal polynomial from surd value x = (P + Q√Δ)/R ⇒ (R x - P)^2 - Q^2 Δ = 0
+ const polyFromSurd = (s: ValSurd) => {
+   if (s.Q === 0n) return null; // rational; show blank as per UI policy
+   const A = s.R * s.R;
+   const B = -2n * s.P * s.R;
+   const C = s.P * s.P - s.Q * s.Q * s.Delta;
+   // normalize sign
+   let g = gcdBI(gcdBI(absBI(A), absBI(B)), absBI(C));
+   let A2 = A / g, B2 = B / g, C2 = C / g;
+   if (A2 < 0n) { A2 = -A2; B2 = -B2; C2 = -C2; }
+   return { A: A2, B: B2, C: C2 };
+ };
+
+ // -------- Tokenizer & Parser for expressions --------
+ type Tok = { t: 'num'; v: bigint } | { t: 'cf'; s: string } | { t: '+'|'-'|'*'|'/'|'('|')' };
+ const tokenize = (src: string): Tok[] => {
+   const s = src.trim();
+   const toks: Tok[] = [];
+   let i = 0;
+   const peek = () => s[i];
+   const next = () => s[i++];
+   while (i < s.length) {
+     const c = peek();
+     if (c <= ' ') { i++; continue; }
+     if (c === '[') {
+       let j = i+1; let depth = 1;
+       while (j < s.length && depth > 0) {
+         const ch = s[j];
+         if (ch === '[') depth++; else if (ch === ']') depth--;
+         j++;
+       }
+       if (depth !== 0) throw new Error('Unclosed [ ... ]');
+       const frag = s.slice(i, j); // includes brackets
+       toks.push({ t: 'cf', s: frag });
+       i = j; continue;
+     }
+     if ('+-*/()'.includes(c)) { toks.push({ t: c as any }); i++; continue; }
+     if (/[0-9]/.test(c)) {
+       let j = i+1; while (j < s.length && /[0-9]/.test(s[j])) j++;
+       toks.push({ t:'num', v: BI(s.slice(i, j)) }); i = j; continue;
+     }
+     throw new Error(`Unexpected character: ${c}`);
+   }
+   // implied multiplication: num][ or num( or )[
+   const out: Tok[] = [];
+   for (let k=0; k<toks.length; k++) {
+     const a = toks[k]; const b = toks[k+1];
+     out.push(a);
+     if (!b) break;
+     const aCat = (a.t === 'num' || a.t === 'cf' || a.t === ')');
+     const bCat = (b.t === 'cf' || b.t === '(');
+     if (aCat && bCat) out.push({ t: '*' });
+   }
+   return out;
+ };
+
+ // Recursive descent parser
+ const parseExpression = (src: string): Val => {
+   const toks = tokenize(src);
+   let k = 0;
+   const at = () => toks[k];
+   const eat = (t?: Tok['t']) => { const x = toks[k]; if (!x) throw new Error('Unexpected end'); if (t && x.t !== t) throw new Error(`Expected ${t}`); k++; return x; };
+
+   const parseFactor = (): Val => {
+     let sign = 1n;
+     while (at() && (at()!.t === '+' || at()!.t === '-')) { sign *= (eat().t === '+' ? 1n : -1n); }
+     let res: Val;
+     const tok = at(); if (!tok) throw new Error('Expected factor');
+     if (tok.t === 'num') { eat(); res = rat(tok.v); }
+     else if (tok.t === 'cf') { eat(); res = cfToVal(parseCF(tok.s)); }
+     else if (tok.t === '(') { eat('('); res = parseExpr(); eat(')'); }
+     else throw new Error('Invalid factor');
+     if (sign === -1n) res = mulVal(rat(-1n), res);
+     return res;
+   };
+   const parseTerm = (): Val => {
+     let res = parseFactor();
+     while (at() && (at()!.t === '*' || at()!.t === '/')) {
+       const op = eat().t; const rhs = parseFactor();
+       res = (op === '*') ? mulVal(res, rhs) : divVal(res, rhs);
+     }
+     return res;
+   };
+   const parseExpr = (): Val => {
+     let res = parseTerm();
+     while (at() && (at()!.t === '+' || at()!.t === '-')) {
+       const op = eat().t; const rhs = parseTerm();
+       res = (op === '+') ? addVal(res, rhs) : subVal(res, rhs);
+     }
+     return res;
+   };
+
+   const v = parseExpr();
+   if (k !== toks.length) throw new Error('Unexpected token at end');
+   return v;
+ };
+
+ const looksLikeExpression = (src: string): boolean => {
+   // detect operators outside [...] or implied num[...
+   let depth = 0;
+   for (let i=0; i<src.length; i++) {
+     const c = src[i];
+     if (c === '[') depth++; else if (c === ']') depth = Math.max(0, depth-1);
+     if (depth === 0 && '+-*/'.includes(c)) return true;
+     if (depth === 0 && /[0-9\)]/.test(c) && src.slice(i+1).trimStart().startsWith('[')) return true;
+   }
+   return false;
+ };
+
 // ---------- UI Component ----------
 export default function ContinuedFractionCalculator() {
   const [input, setInput] = useState<string>("[2; 1, 2, 3, 1]");
@@ -333,6 +560,10 @@ export default function ContinuedFractionCalculator() {
   const [convCount, setConvCount] = useState<number>(12);
 
   const parsed = useMemo(() => {
+    // Skip CF parsing entirely when the input is an arithmetic expression.
+    if (looksLikeExpression(input)) {
+      return { ok: false as const, error: "" as string };
+    }
     try {
       const p = parseCF(input);
       return { ok: true as const, value: p };
@@ -342,6 +573,23 @@ export default function ContinuedFractionCalculator() {
   }, [input]);
 
   const result = useMemo(() => {
+    // Expression mode
+    if (looksLikeExpression(input)) {
+      try {
+        const v = parseExpression(input);
+        if (v.kind === 'rat') {
+          return { kind: 'expr', expr: { exactLatex: latexRational(v.p, v.q), approx: Number(v.p)/Number(v.q), poly: null } } as const;
+        } else if (v.kind === 'surd') {
+          const poly = polyFromSurd(v);
+          return { kind: 'expr', expr: { exactLatex: latexSurd(v.P, v.Q, v.R, v.Delta), approx: (Number(v.P)+Number(v.Q)*Math.sqrt(Number(v.Delta)))/Number(v.R), poly } } as const;
+        } else {
+          return { kind: 'expr', expr: { exactLatex: `${bs}approx ${v.x}`, approx: v.x, poly: null } } as const;
+        }
+      } catch (e: any) {
+        return { kind: 'error', error: e.message || String(e) } as const;
+      }
+    }
+
     if (!parsed.ok) return null;
     const { a0, prefix, period, isPeriodic } = parsed.value;
 
@@ -355,7 +603,7 @@ export default function ContinuedFractionCalculator() {
       };
     }
 
-    // Periodic: prefix = [a0, ...], period = [...]
+    // Periodic
     const Mpref = matFromSeq([a0, ...prefix]);
     const [alpha, beta] = Mpref[0];
     const [gamma, delta] = Mpref[1];
@@ -375,7 +623,7 @@ export default function ContinuedFractionCalculator() {
       kind: "periodic" as const,
       surd, poly, period, prefixAll: [a0, ...prefix], conv
     };
-  }, [parsed, convCount]);
+  }, [parsed, convCount, input]);
 
   const onExample = (str: string) => setInput(str);
 
@@ -426,10 +674,48 @@ export default function ContinuedFractionCalculator() {
 
         {/* Results */}
         <div className="mt-6 grid gap-6">
-          {!parsed.ok && (
+          {!looksLikeExpression(input) && !parsed.ok && (
             <div className="bg-rose-900/40 border border-rose-700 text-rose-100 rounded-xl p-4">
               <div className="font-bold">Parsing Error</div>
               <div className="opacity-90 mt-1">{parsed.error}</div>
+            </div>
+          )}
+
+          {result && result.kind === "error" && (
+            <div className="bg-rose-900/40 border border-rose-700 text-rose-100 rounded-xl p-4">
+              <div className="font-bold">Parsing Error</div>
+              <div className="opacity-90 mt-1">{(result as any).error}</div>
+            </div>
+          )}
+
+          {result && result.kind === "expr" && (
+            <div className="bg-white/5 backdrop-blur rounded-2xl p-5 shadow-xl ring-1 ring-white/10">
+              <h2 className="text-xl font-semibold mb-3">Expression result</h2>
+              <div className="grid lg:grid-cols-2 gap-6">
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-sm text-slate-300">Exact value (LaTeX)</div>
+                    <div className="mt-1 text-lg break-all"><Latex expr={(result as any).expr.exactLatex} block /></div>
+                    <div className="mt-2 flex gap-2">
+                      <button onClick={()=>copy((result as any).expr.exactLatex)} className="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 hover:bg-slate-700 text-sm">Copy LaTeX</button>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm text-slate-300">Approximation</div>
+                    <div className="font-mono text-lg mt-1">{roundTo((result as any).expr.approx, digits)}</div>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-sm text-slate-300">Minimal polynomial (in x)</div>
+                    <div className="mt-1 text-lg">{(result as any).expr.poly ? <Latex expr={latexPoly((result as any).expr.poly.A, (result as any).expr.poly.B, (result as any).expr.poly.C)} block /> : <span className="text-slate-400">—</span>}</div>
+                  </div>
+                  <div>
+                    <div className="text-sm text-slate-300 mb-2">Convergents</div>
+                    <div className="text-slate-400">—</div>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
@@ -575,7 +861,7 @@ export default function ContinuedFractionCalculator() {
         </div>
 
         <footer className="mt-10 text-center text-slate-500 text-xs">
-          Made by Koki Yamada with ChatGPT
+          Made by ChatGPT with Koki Yamada
         </footer>
       </div>
     </div>
